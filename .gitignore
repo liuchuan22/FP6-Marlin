@@ -1,0 +1,9 @@
+build
+dist
+profile.ncu-rep
+*.egg-info*
+backup
+fp6_marlin/__pycache__
+fp6_marlin/*.cpython-*
+_backup
+__pycache__

@@ -92,9 +92,9 @@ using FragB = Vec<half2, 2>;
 using FragC = Vec<float, 4>;
 using FragS = Vec<half2, 1>;
 
-__device__ inline void mma(const FragA& frag_a, const FragB& frag_b, FragC& frag_c) {
+__device__ inline void mma(const FragA& frag_a, const uint32_t* b, FragC& frag_c) {
   const uint32_t* a = reinterpret_cast<const uint32_t*>(&frag_a);
-  const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
+  // const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
   float* c = reinterpret_cast<float*>(&frag_c);
   asm volatile(
     "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
@@ -172,28 +172,148 @@ __device__ inline void dequant_32fp6(
   }
 }
 
+__device__ inline void dequant_8fp6(
+  uint32_t __restrict__ reg[4],
+  uint32_t q_2bit,
+  uint32_t q_4bit
+){
+  uint32_t *output_regs = reinterpret_cast<uint32_t*>(reg);
+  uint32_t packed_fp6 = 0;
+  uint32_t tmp = 0;
+  tmp = q_2bit & 0xc0c0c0c0;
+  packed_fp6 |= tmp;
+  tmp = q_4bit & 0xf0f0f0f0;
+  packed_fp6 |= tmp >> 2;
+  uint32_t out1, out2;
+  constexpr int mask1 = 0x80000000;
+  constexpr int mask2 = mask1 >> 5;
+  constexpr int mask3 = mask2 & 0x7fffffff;
+  constexpr int mask = mask3 | mask3 >> 16;
+  out1 = packed_fp6 & 0x80008000;
+  out1 |= (packed_fp6 & mask) >> 2;
+  packed_fp6 = packed_fp6 << 8;
+  out2 = packed_fp6 & 0x80008000;
+  out2 |= (packed_fp6 & mask) >> 2;
+  *output_regs = mult_bias(out1);
+  output_regs++;
+  *output_regs = mult_bias(out2);
+  output_regs++;
+  q_2bit = q_2bit << 2;
+  q_4bit = q_4bit << 4;
+  packed_fp6 = 0;
+  tmp = q_2bit & 0xc0c0c0c0;
+  packed_fp6 |= tmp;
+  tmp = q_4bit & 0xf0f0f0f0;
+  packed_fp6 |= tmp >> 2;
+  out1 = packed_fp6 & 0x80008000;
+  out1 |= (packed_fp6 & mask) >> 2;
+  packed_fp6 = packed_fp6 << 8;
+  out2 = packed_fp6 & 0x80008000;
+  out2 |= (packed_fp6 & mask) >> 2;
+  *output_regs = mult_bias(out1);
+  output_regs++;
+  *output_regs = mult_bias(out2);
+  output_regs++;
+}
+// Lookup-table based 3-input logical operation; explicitly used for dequantization as the compiler does not seem to
+// automatically recognize it in all cases. 
+template <int lut>
+__device__ inline int lop3(int a, int b, int c) {
+  int res;
+  asm volatile(
+    "lop3.b32 %0, %1, %2, %3, %4;\n"
+    : "=r"(res) : "r"(a), "r"(b), "r"(c), "n"(lut)
+  );
+  return res;
+}
+__device__ inline void dequant_8int4(
+  uint32_t __restrict__ reg[4],
+  uint32_t __restrict__ *read_rptr_4bit
+) {
+  half2 *reg_ptr = reinterpret_cast<half2*>(reg);
+  int q = *read_rptr_4bit;
+  const int LO = 0x000f000f;
+  const int HI = 0x00f000f0;
+  const int EX = 0x64006400;
+  const int SUB = 0x64086408;
+  const int MUL = 0x2c002c00;
+  const int ADD = 0xd480d480;
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  *reg_ptr = __hsub2(
+    *reinterpret_cast<half2*>(&lo),
+    *reinterpret_cast<const half2*>(&SUB)
+  );
+  reg_ptr++;
+  *reg_ptr = __hfma2(
+    *reinterpret_cast<half2*>(&hi),
+    *reinterpret_cast<const half2*>(&MUL),
+    *reinterpret_cast<const half2*>(&ADD)
+  );
+  reg_ptr++;
+  lo = lop3<(0xf0 & 0xcc) | 0xaa>(q >> 8, LO, EX);
+  hi = lop3<(0xf0 & 0xcc) | 0xaa>(q >> 8, HI, EX);
+  *reg_ptr = __hsub2(
+    *reinterpret_cast<half2*>(&lo),
+    *reinterpret_cast<const half2*>(&SUB)
+  );
+  reg_ptr++;
+  *reg_ptr = __hfma2(
+    *reinterpret_cast<half2*>(&hi),
+    *reinterpret_cast<const half2*>(&MUL),
+    *reinterpret_cast<const half2*>(&ADD)
+  );
+  reg_ptr++;
+}
+
 template <
   const int threads,
   const int thread_m_blocks,
   const int thread_n_blocks,
   const int thread_k_blocks,
-  const int stages
+  const int stages,
+  // the number of 6 bit quantization columns of B matrix
+  const int quant_cols = -1
 >
 __global__ void fp6_kernel_marlin(
   const uint4* __restrict__ A,
   const uint4* __restrict__ B, // fp6 quantized weight matrix of shape kxn
   uint4* __restrict__ C,
-  const uint4* __restrict__ s, // fp16 quantization scales of shape (k/groupsize)xn, only per-channel quantization so size is 1xn
+  const uint4* __restrict__ s, // fp16 quantization scales of shape 1xn
   int  prob_m,
   int  prob_n,
   int  prob_k,
   int* locks // extra global storage for barrier synchronization
 ) {
+
+  bool is_6bit = false;
+  int bit4_sm = gridDim.x;
+  if (quant_cols != -1) {
+    int ratio = prob_n / quant_cols;
+    int bit6_sm = gridDim.x * 3 / (ratio * 2);
+    bit4_sm = gridDim.x - bit6_sm;
+    if (blockIdx.x < bit4_sm) {
+      prob_n = prob_n - quant_cols;
+    } else {
+      is_6bit = true;
+      B += (prob_n - quant_cols) * prob_k * 4 / 128;
+      s += (prob_n - quant_cols) * 16 / 128;
+      prob_n = quant_cols;
+    }
+  }
+  const uint2 B_2bit;
+  const uint4 B_4bit;
+  if (is_6bit) {
+    B_2bit = reinterpret_cast<const uint2*>(B);
+    B_4bit = B + prob_k * prob_n * 2 / 128;
+  } else {
+    B_2bit = nullptr;
+    B_4bit = B;
+  }
+
   // first get the pointer of packed 2 bit and 4 bit fp6 values
-  const uint2* B_2bit = reinterpret_cast<const uint2*>(B);
-  // printf("hello 1\n");
-  const uint4* B_4bit = B + prob_k * prob_n * 2 / 128;
-  // printf("hello 2\n");
+  // const uint2* B_2bit = reinterpret_cast<const uint2*>(B);
+  // const uint4* B_4bit = B + prob_k * prob_n * 2 / 128;
 
   int parallel = 1;
   if (prob_m > 16 * thread_m_blocks) {
@@ -202,7 +322,14 @@ __global__ void fp6_kernel_marlin(
   }
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
-  int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
+  // int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
+  int iters;
+  if (is_6bit) {
+    iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x - bit4_sm);
+    blockIdx.x -= bit4_sm;
+  } else {
+    iters = ceildiv(k_tiles * n_tiles * parallel, bit4_sm);
+  }
 
   // a `slice` is a group of threadblocks that work on the same n-tile (of size K x 16 x thread_n_blocks)
   int slice_row = (iters * blockIdx.x) % k_tiles;
@@ -214,6 +341,7 @@ __global__ void fp6_kernel_marlin(
 
   if (slice_col_par >= n_tiles) {
     A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
+    //!TODO: C needs to be handled specially!
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
@@ -230,7 +358,7 @@ __global__ void fp6_kernel_marlin(
     slice_count = 1;
     slice_idx = 0;
     int col_first = iters * ceildiv(k_tiles * slice_col_par, iters);
-    if (col_first <= k_tiles * (slice_col_par + 1)) { // should be always true here, I think
+    if (col_first <= k_tiles * (slice_col_par + 1)) {
       int col_off = col_first - k_tiles * slice_col_par;
       slice_count = ceildiv(k_tiles - col_off, iters);
       if (col_off > 0)
@@ -246,6 +374,7 @@ __global__ void fp6_kernel_marlin(
     }
     if (slice_col == n_tiles) {
       A += 16 * thread_m_blocks * prob_k / 8;
+      //!TODO: C needs to be handled specially!
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
@@ -275,8 +404,6 @@ __global__ void fp6_kernel_marlin(
 
   int s_gl_stride = prob_n / 8;
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
-  // constexpr int s_sh_stage = s_sh_stride;
-  // int s_gl_rd_delta = s_gl_stride;
 
   // Global/Shared A read/write index of current thread.
   int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
@@ -325,11 +452,11 @@ __global__ void fp6_kernel_marlin(
   for (int i = 0; i < b_sh_wr_iters; i++) {
     B_ptr_4bit[i] = B_4bit + b_gl_rd_delta_i * i + b_gl_rd;
   }
-  // May have some problems regarding loading the 2 bit value here? Maybe not?
   const uint2* B_ptr_2bit[b_sh_wr_iters];
   #pragma unroll
   for (int i = 0; i < b_sh_wr_iters; i++) {
-    B_ptr_2bit[i] = B_2bit + b_gl_rd_delta_i * i + b_gl_rd;
+    // B_ptr_2bit[i] = B_2bit + b_gl_rd_delta_i * i + b_gl_rd;
+    B_ptr_2bit[i] = (!is_6bit) ? nullptr : B_2bit + b_gl_rd_delta_i * i + b_gl_rd;
   }
 
   // shared memory
@@ -338,7 +465,7 @@ __global__ void fp6_kernel_marlin(
   // 4bit first, then 2bit. This is best suited for later reductions of marlin.
   uint4* shared_B_4bit = shared_A + a_sh_stage * stages;
   uint2* shared_B_2bit = reinterpret_cast<uint2*>(shared_B_4bit + b_sh_stage * stages);
-  uint4* shared_S = reinterpret_cast<uint4*>(shared_B_2bit + b_sh_stage * stages);
+  uint4* shared_S = (!is_6bit) ? reinterpret_cast<uint4*>(shared_B_2bit): reinterpret_cast<uint4*>(shared_B_2bit + b_sh_stage * stages);
 
   // registers
   FragA a_frag[2][thread_m_blocks];
@@ -371,11 +498,16 @@ __global__ void fp6_kernel_marlin(
         cp_async4_stream(&sh_b_stage_4bit[b_sh_wr_delta * i + b_sh_wr], B_ptr_4bit[i]);
         B_ptr_4bit[i] += b_gl_rd_delta_o;
       }
-      uint2* sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
-      #pragma unroll
-      for (int i = 0; i < b_sh_wr_iters; i++) {
-        cp_async2_stream(&sh_b_stage_2bit[b_sh_wr_delta * i + b_sh_wr], B_ptr_2bit[i]);
-        B_ptr_2bit[i] += b_gl_rd_delta_o;
+      uint2* sh_b_stage_2bit;
+      if (is_6bit) {
+        sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
+        #pragma unroll
+        for (int i = 0; i < b_sh_wr_iters; i++) {
+          cp_async2_stream(&sh_b_stage_2bit[b_sh_wr_delta * i + b_sh_wr], B_ptr_2bit[i]);
+          B_ptr_2bit[i] += b_gl_rd_delta_o;
+        }
+      } else {
+        sh_b_stage_2bit = nullptr;
       }
     }
     cp_async_fence();
@@ -394,33 +526,69 @@ __global__ void fp6_kernel_marlin(
     }
     uint4* sh_b_stage_4bit = shared_B_4bit + b_sh_stage * pipe;
     b_frag_4bit[k%2] = *reinterpret_cast<I4*>(&sh_b_stage_4bit[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd]);
-    uint2* sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
-    b_frag_2bit[k%2] = *reinterpret_cast<I2*>(&sh_b_stage_2bit[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd]);
+    uint2* sh_b_stage_2bit;
+    if (is_6bit) {
+      sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
+      b_frag_2bit[k%2] = *reinterpret_cast<I2*>(&sh_b_stage_2bit[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd]);
+    } else {
+      sh_b_stage_2bit = nullptr;
+    }
   };
 
   auto matmul = [&] (int k) {
-    // first dequant the 32 fp6 values in registers
-    uint32_t b_dequant[4][4];
-    uint32_t *b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
-    uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
-    // scale later if we do per-channel quantization
-    dequant_32fp6(b_dequant, b_frag_2bit_ptr, b_frag_4bit_ptr);
-
-    // then do the mma
     #pragma unroll
-    for (int j = 0; j < 4; j++) { // 4 16x16 subtiles in the row of B dimension.
-      FragB b_frag0, b_frag1;
-      b_frag0[0] = reinterpret_cast<half2&>(b_dequant[j][0]);
-      b_frag0[1] = reinterpret_cast<half2&>(b_dequant[j][1]);
-      b_frag1[0] = reinterpret_cast<half2&>(b_dequant[j][2]);
-      b_frag1[1] = reinterpret_cast<half2&>(b_dequant[j][3]);
-
-      #pragma unroll
+    for (int j = 0; j < 4; j++) {
+      uint32_t *b_frag_2bit_ptr;
+      uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
+      uint32_t b_dequant[4];
+      if (is_6bit) {
+        b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
+        dequant_8fp6(b_dequant, *b_frag_2bit_ptr, *b_frag_4bit_ptr);
+        if (j % 2 == 1) {
+          b_frag_2bit_ptr++;
+        } else {
+          *b_frag_2bit_ptr = *b_frag_2bit_ptr << 4;
+        }
+      } else {
+        b_frag_2bit_ptr = nullptr;
+        dequant_8int4(b_dequant, b_frag_4bit_ptr);
+      }
+      b_frag_4bit_ptr++;
       for (int i = 0; i < thread_m_blocks; i++) {
-        mma(a_frag[k % 2][i], b_frag0, c_frag[i][j][0]);
-        mma(a_frag[k % 2][i], b_frag1, c_frag[i][j][1]);
+        uint32_t* b_dequant_ptr = reinterpret_cast<uint32_t*>(&b_dequant);
+        mma(frag_a[k % 2][i], b_dequant_ptr, c_frag[i][j][0]);
+        b_dequant_ptr += 2;
+        mma(frag_a[k % 2][i], b_dequant_ptr, c_frag[i][j][1]);
       }
     }
+    // first dequant the 32 fp6 values in registers
+    // uint32_t b_dequant[4][4];
+    // uint32_t *b_frag_2bit_ptr;
+    // if (is_6bit) {
+    //   b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
+    // } else {
+    //   b_frag_2bit_ptr = nullptr;
+    // }     
+    // uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
+    // // scale later if we do per-channel quantization
+    // //!TODO: Add the dequant function of 4bit!
+    // dequant_32fp6(b_dequant, b_frag_2bit_ptr, b_frag_4bit_ptr);
+
+    // // then do the mma
+    // #pragma unroll
+    // for (int j = 0; j < 4; j++) { // 4 16x16 subtiles in the row of B dimension.
+    //   FragB b_frag0, b_frag1;
+    //   b_frag0[0] = reinterpret_cast<half2&>(b_dequant[j][0]);
+    //   b_frag0[1] = reinterpret_cast<half2&>(b_dequant[j][1]);
+    //   b_frag1[0] = reinterpret_cast<half2&>(b_dequant[j][2]);
+    //   b_frag1[1] = reinterpret_cast<half2&>(b_dequant[j][3]);
+
+    //   #pragma unroll
+    //   for (int i = 0; i < thread_m_blocks; i++) {
+    //     mma(a_frag[k % 2][i], b_frag0, c_frag[i][j][0]);
+    //     mma(a_frag[k % 2][i], b_frag1, c_frag[i][j][1]);
+    //   }
+    // }
   };
 
   // reduce over the multiple warps in smem of one threadblock
@@ -466,6 +634,7 @@ __global__ void fp6_kernel_marlin(
     }
   };
 
+  //!TODO: Moidfy Global reduce and Write result for C matrix part.
   auto global_reduce = [&] (bool first = false, bool last = false) {
     constexpr int active_threads = 32 * thread_n_blocks / 4;
     if (threadIdx.x < active_threads) {
@@ -578,11 +747,6 @@ __global__ void fp6_kernel_marlin(
 
   start_pipes();
 
-  // if (threadIdx.x == 0){
-  //   printf("b_2bit: %u %u\n", b_frag_2bit[0][0], b_frag_2bit[0][1]);
-  //   printf("b_4bit: %u %u %u %u\n", b_frag_4bit[0][0], b_frag_4bit[0][1], b_frag_4bit[0][2], b_frag_4bit[0][3]);
-  // }
-
   while (slice_iters) {
     #pragma unroll
     for (int pipe = 0; pipe < stages;) {
@@ -632,16 +796,20 @@ __global__ void fp6_kernel_marlin(
       init_slice();
       if (slice_iters) {
         a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
-        #pragma unroll
-        for (int i = 0; i < b_sh_wr_iters; i++)
-          B_ptr_2bit[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
+        if (is_6bit) {
+          #pragma unroll
+          for (int i = 0; i < b_sh_wr_iters; i++)
+            B_ptr_2bit[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
+        }
         #pragma unroll
         for (int i = 0; i < b_sh_wr_iters; i++)
           B_ptr_4bit[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
         if (slice_col == 0) {
-          #pragma unroll
-          for (int i = 0; i < b_sh_wr_iters; i++)
-            B_ptr_2bit[i] -= b_gl_stride;
+          if (is_6bit) {
+            #pragma unroll
+            for (int i = 0; i < b_sh_wr_iters; i++)
+              B_ptr_2bit[i] -= b_gl_stride;
+          }
           #pragma unroll
           for (int i = 0; i < b_sh_wr_iters; i++)
             B_ptr_4bit[i] -= b_gl_stride;

@@ -17,7 +17,8 @@ int fp6_marlin_cuda(
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1,
-  int max_par = 16
+  int max_par = 16,
+  int quant_cols = -1
 );
 
 const int ERR_PROB_SHAPE = 1;
@@ -29,6 +30,7 @@ void fp6_marlin_mul(
         torch::Tensor& C,
   const torch::Tensor& s,
         torch::Tensor& workspace,
+  int quant_cols = -1,
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1,
@@ -52,7 +54,8 @@ void fp6_marlin_mul(
     thread_k,
     thread_n,
     sms,
-    max_par
+    max_par,
+    quant_cols
   );
   if (err == ERR_PROB_SHAPE) {
     AT_ERROR(

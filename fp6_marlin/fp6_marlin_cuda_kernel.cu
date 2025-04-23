@@ -228,10 +228,9 @@ __device__ inline int lop3(int a, int b, int c) {
 }
 __device__ inline void dequant_8int4(
   uint32_t __restrict__ reg[4],
-  uint32_t __restrict__ *read_rptr_4bit
+  uint32_t q
 ) {
   half2 *reg_ptr = reinterpret_cast<half2*>(reg);
-  int q = *read_rptr_4bit;
   const int LO = 0x000f000f;
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
@@ -288,9 +287,10 @@ __global__ void fp6_kernel_marlin(
 
   bool is_6bit = false;
   int bit4_sm = gridDim.x;
+  int prob_n_global = prob_n;
   if (quant_cols != -1) {
     int ratio = prob_n / quant_cols;
-    int bit6_sm = gridDim.x * 3 / (ratio * 2);
+    int bit6_sm = gridDim.x / ratio;
     bit4_sm = gridDim.x - bit6_sm;
     if (blockIdx.x < bit4_sm) {
       prob_n = prob_n - quant_cols;
@@ -298,11 +298,13 @@ __global__ void fp6_kernel_marlin(
       is_6bit = true;
       B += (prob_n - quant_cols) * prob_k * 4 / 128;
       s += (prob_n - quant_cols) * 16 / 128;
+      // offset of B, s and C
+      C += (prob_n - quant_cols) * 16 / 128;
       prob_n = quant_cols;
     }
   }
-  const uint2 B_2bit;
-  const uint4 B_4bit;
+  const uint2* B_2bit;
+  const uint4* B_4bit;
   if (is_6bit) {
     B_2bit = reinterpret_cast<const uint2*>(B);
     B_4bit = B + prob_k * prob_n * 2 / 128;
@@ -324,16 +326,18 @@ __global__ void fp6_kernel_marlin(
   int n_tiles = prob_n / 16 / thread_n_blocks;
   // int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
   int iters;
+  int block_id;
   if (is_6bit) {
     iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x - bit4_sm);
-    blockIdx.x -= bit4_sm;
+    block_id = blockIdx.x - bit4_sm;
   } else {
     iters = ceildiv(k_tiles * n_tiles * parallel, bit4_sm);
+    block_id = blockIdx.x;
   }
 
   // a `slice` is a group of threadblocks that work on the same n-tile (of size K x 16 x thread_n_blocks)
-  int slice_row = (iters * blockIdx.x) % k_tiles;
-  int slice_col_par = (iters * blockIdx.x) / k_tiles;
+  int slice_row = (iters * block_id) % k_tiles;
+  int slice_col_par = (iters * block_id) / k_tiles;
   int slice_col = slice_col_par;
   int slice_iters; // number of tiles in current slice
   int slice_count = 0; // total number of active threadblocks in the current slice
@@ -342,13 +346,13 @@ __global__ void fp6_kernel_marlin(
   if (slice_col_par >= n_tiles) {
     A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
     //!TODO: C needs to be handled specially!
-    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
+    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n_global / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
   }
 
   auto init_slice = [&] () {
-    slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
+    slice_iters = iters * (block_id + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= n_tiles * parallel)
       slice_iters = 0;
     if (slice_iters == 0)
@@ -363,7 +367,7 @@ __global__ void fp6_kernel_marlin(
       slice_count = ceildiv(k_tiles - col_off, iters);
       if (col_off > 0)
         slice_count++;
-      int delta_first = iters * blockIdx.x - col_first;
+      int delta_first = iters * block_id - col_first;
       if (delta_first < 0 || (col_off == 0 && delta_first == 0))
         slice_idx = slice_count - 1;
       else {
@@ -375,7 +379,7 @@ __global__ void fp6_kernel_marlin(
     if (slice_col == n_tiles) {
       A += 16 * thread_m_blocks * prob_k / 8;
       //!TODO: C needs to be handled specially!
-      C += 16 * thread_m_blocks * prob_n / 8;
+      C += 16 * thread_m_blocks * prob_n_global / 8;
       locks += n_tiles;
       slice_col = 0;
     }
@@ -551,14 +555,14 @@ __global__ void fp6_kernel_marlin(
         }
       } else {
         b_frag_2bit_ptr = nullptr;
-        dequant_8int4(b_dequant, b_frag_4bit_ptr);
+        dequant_8int4(b_dequant, *b_frag_4bit_ptr);
       }
       b_frag_4bit_ptr++;
       for (int i = 0; i < thread_m_blocks; i++) {
         uint32_t* b_dequant_ptr = reinterpret_cast<uint32_t*>(&b_dequant);
-        mma(frag_a[k % 2][i], b_dequant_ptr, c_frag[i][j][0]);
+        mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][0]);
         b_dequant_ptr += 2;
-        mma(frag_a[k % 2][i], b_dequant_ptr, c_frag[i][j][1]);
+        mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][1]);
       }
     }
     // first dequant the 32 fp6 values in registers
@@ -638,7 +642,7 @@ __global__ void fp6_kernel_marlin(
   auto global_reduce = [&] (bool first = false, bool last = false) {
     constexpr int active_threads = 32 * thread_n_blocks / 4;
     if (threadIdx.x < active_threads) {
-      int c_gl_stride = prob_n / 8;
+      int c_gl_stride = prob_n_global / 8;
       int c_gl_wr_delta_o = 8 * c_gl_stride;
       int c_gl_wr_delta_i = 4 * (active_threads / 32);
       int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) + 4 * (threadIdx.x / 32) + threadIdx.x % 4;
@@ -689,7 +693,7 @@ __global__ void fp6_kernel_marlin(
   };
 
   auto write_result = [&] () {
-    int c_gl_stride = prob_n / 8;
+    int c_gl_stride = prob_n_global / 8;
     constexpr int c_sh_stride = 2 * thread_n_blocks + 1;
     int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));
     constexpr int c_sh_rd_delta = c_sh_stride * (threads / (2 * thread_n_blocks));
@@ -700,6 +704,7 @@ __global__ void fp6_kernel_marlin(
     c_sh_wr += 32 * (threadIdx.x / 32);
     int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
 
+    //!TODO: probably problem here.
     int c_gl_wr_end = c_gl_stride * prob_m;
 
     // We first reorder in shared memory to guarantee the most efficient final global write patterns
@@ -825,17 +830,17 @@ const int THREADS = 256;
 const int STAGES = 4;
 const int SHARED_MEM = 96 * 1024; // max shared memory on compute capability 8.6 (< 8.0). What about 9.0?
 
-#define CALL_IF(THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS) \
+#define CALL_IF(THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, QUANT_COLS) \
   else if ( \
-    thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && thread_k_blocks == THREAD_K_BLOCKS \
+    thread_m_blocks == THREAD_M_BLOCKS && thread_n_blocks == THREAD_N_BLOCKS && thread_k_blocks == THREAD_K_BLOCKS && quant_cols == QUANT_COLS \
   ) { \
     cudaFuncSetAttribute( \
-      fp6_kernel_marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES>, \
+      fp6_kernel_marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, QUANT_COLS>, \
       cudaFuncAttributeMaxDynamicSharedMemorySize, \
       SHARED_MEM \
     ); \
     fp6_kernel_marlin< \
-      THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES \
+      THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, QUANT_COLS \
     ><<<blocks, THREADS, SHARED_MEM, stream>>>( \
       A_ptr, B_ptr, C_ptr, s_ptr, \
       prob_m, prob_n, prob_k, \
@@ -860,7 +865,8 @@ int fp6_marlin_cuda(
   int thread_k = -1,
   int thread_n = -1,
   int sms = -1,
-  int max_par = 16
+  int max_par = 16,
+  int quant_cols = -1
 ) {
   int tot_m = prob_m;
   int tot_m_blocks = ceildiv(tot_m, 16);
@@ -914,11 +920,16 @@ int fp6_marlin_cuda(
     
     // specific configurations
     if (false) {}
-    CALL_IF(1,  8,  8)
-    CALL_IF(1, 16,  4)
-    CALL_IF(2, 16,  4)
-    CALL_IF(3, 16,  4)
-    CALL_IF(4, 16,  4)
+    CALL_IF(1,  8, 8, 256)
+    CALL_IF(1, 16, 4, 256)
+    CALL_IF(2, 16, 4, 256)
+    CALL_IF(3, 16, 4, 256)
+    CALL_IF(4, 16, 4, 256)
+    CALL_IF(1,  8, 8, -1)
+    CALL_IF(1, 16, 4, -1)
+    CALL_IF(2, 16, 4, -1)
+    CALL_IF(3, 16, 4, -1)
+    CALL_IF(4, 16, 4, -1)
     else
       ret = ERR_KERN_SHAPE;
 

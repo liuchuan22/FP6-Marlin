@@ -36,5 +36,6 @@ def dequantize(fp6_tensor: torch.Tensor, fp16_scales: torch.Tensor) -> torch.Ten
     """
     return fp6_marlin.cpu.dequantization_cpu(fp6_tensor, fp16_scales)
 
-def mul(A, B, C, s, workspace, thread_k = -1, thread_n = -1, sms = -1, max_par = 16):
-    return fp6_marlin.cuda.mul(A, B, C, s, workspace, thread_k, thread_n, sms, max_par)
+def mul(A, B, C, s, workspace, quant_cols = -1, thread_k = -1, thread_n = -1, sms = -1, max_par = 16):
+    return fp6_marlin.cuda.mul(A, B, C, s, workspace, quant_cols, thread_k, thread_n, sms, max_par)
+    

@@ -540,13 +540,17 @@ __global__ void fp6_kernel_marlin(
   };
 
   auto matmul = [&] (int k) {
+    uint32_t *b_frag_2bit_ptr;
+    uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
+    if (is_6bit) {
+      b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
+    } else {
+      b_frag_2bit_ptr = nullptr;
+    }
+    uint32_t b_dequant[4];
     #pragma unroll
     for (int j = 0; j < 4; j++) {
-      uint32_t *b_frag_2bit_ptr;
-      uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
-      uint32_t b_dequant[4];
       if (is_6bit) {
-        b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
         dequant_8fp6(b_dequant, *b_frag_2bit_ptr, *b_frag_4bit_ptr);
         if (j % 2 == 1) {
           b_frag_2bit_ptr++;
@@ -554,7 +558,6 @@ __global__ void fp6_kernel_marlin(
           *b_frag_2bit_ptr = *b_frag_2bit_ptr << 4;
         }
       } else {
-        b_frag_2bit_ptr = nullptr;
         dequant_8int4(b_dequant, *b_frag_4bit_ptr);
       }
       b_frag_4bit_ptr++;

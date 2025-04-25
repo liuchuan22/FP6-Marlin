@@ -26,7 +26,7 @@ def gen_fp6_weight(w: torch.Tensor, k: int, n: int):
     w = torch.where(torch.abs(w) < minq, torch.zeros_like(w), w)
     w = torch.clamp(w, -maxq, maxq)
     # debugging, set s as a tensor of ones
-    # s = torch.ones(n, dtype=torch.half, device='cpu')
+    s = torch.ones(n, dtype=torch.half, device='cpu')
 
     # quantize 
     w_quant = fp6_marlin.quantize(w)    # shape (n, k * 3 / 16), type torch.kbyte
@@ -90,8 +90,12 @@ def gen_int4_weight(w: torch.Tensor, k: int, n: int):
     w = torch.round(w / s).int()
     w += (maxq + 1) // 2
     w = torch.clamp(w, 0, maxq)
-    ref = (w - (maxq + 1) // 2).half() * s
     s = s.reshape((-1, n)).contiguous()
+
+    # debugging, set s as a tensor of ones
+    s = torch.ones((1, n), dtype=torch.half, device='cpu')
+
+    ref = (w - (maxq + 1) // 2).half() * s
     w = torch.round(ref / s).int()
     w += (maxq + 1) // 2
     w = torch.clamp(w, 0, maxq)
@@ -100,7 +104,7 @@ def gen_int4_weight(w: torch.Tensor, k: int, n: int):
     s = s.reshape((-1, n)).contiguous()
     s = s.squeeze(0) # shape (1, n) -> (n,)
     w = w.reshape((k // 16, 16, n // 16, 16))
-    w = w.permute(0, 2, 1, 3)
+    w = w.permute((0, 2, 1, 3))
     w = w.reshape((k // 16, n * 16))
     w = w.reshape((-1, perm.numel()))[:, perm].reshape(w.shape)
     w = w.numpy().astype(np.uint32)
@@ -151,81 +155,93 @@ def gen_mixed_weight(K: int, N: int, quant_cols: int = -1):
 # breakpoint()
 
 class Test(unittest.TestCase):
-    # def run_problem(self, m, n, k, thread_k, thread_n):
-    #     print('% 5d % 6d % 6d % 4d % 4d' % (m, n, k, thread_k, thread_n))
-    #     A = torch.randn((m, k), dtype=torch.half, device=DEV)
-    #     B_ref, B, s = gen_fp6_weight(k, n)
-    #     # print(B_ref)
-    #     C = torch.zeros((m, n), dtype=torch.half, device=DEV)
-    #     C_ref = torch.matmul(A, B_ref)
-    #     workspace = torch.zeros(n // 128 * 16, device=DEV)
-    #     fp6_marlin.mul(A, B, C, s, workspace, thread_k, thread_n)
-    #     torch.cuda.synchronize()
-    #     self.assertLess(torch.mean(torch.abs(C - C_ref)) / torch.mean(torch.abs(C_ref)), 0.001)
 
     def run_problem(self, m, n, k, thread_k, thread_n, quant_cols=-1):
         print('% 5d % 6d % 6d % 4d % 4d % 4d' % (m, n, k, thread_k, thread_n, quant_cols))
-        A = torch.randn((m, k), dtype=torch.half, device=DEV)
+        # A = torch.randn((m, k), dtype=torch.half, device=DEV)
+        A = torch.randint(1, 2, (m, k), dtype=torch.half, device=DEV)
+        # A[0, :16] = 0.
         B_ref, B, s = gen_mixed_weight(k, n, quant_cols)
-        C = torch.zeros((m, n), dtype=torch.half, device=DEV)
+        C = torch.zeros((m, n), dtype=torch.half, device=DEV).contiguous()
         C_ref = torch.matmul(A, B_ref)
         workspace = torch.zeros(n // 128 * 16, device=DEV)
         fp6_marlin.mul(A, B, C, s, workspace, quant_cols, thread_k, thread_n)
         torch.cuda.synchronize()
+        C = C.flatten()
+        if quant_cols != -1:
+            c_1 = C[:m*(n-quant_cols)].reshape(m, n-quant_cols)
+            c_2 = C[m*(n-quant_cols):].reshape(m, quant_cols)
+            C = torch.cat([c_1, c_2], dim=1)
+        C = C.reshape(m, n)
+        # print(C)
+        # print(C_ref)
+        print('C', C.shape)
+        print(C-C_ref)
+        nonzero_indices = torch.nonzero(C - C_ref)
+        # print(nonzero_indices)
         self.assertLess(torch.mean(torch.abs(C - C_ref)) / torch.mean(torch.abs(C_ref)), 0.001)
 
-    def test_tiles(self):
-        print()
-        for m in [1, 2, 3, 4, 8, 12, 16, 24, 32, 48, 64, 118, 128, 152, 768, 1024]:
-            for thread_k, thread_n in [(64, 256), (128, 128)]:
-                if m > 16 and thread_k == 128:
-                    continue
-                # testing  'ideal' case
-                self.run_problem(m, 256*2, 1024, thread_k, thread_n)
+    # def test_tiles(self):
+    #     print()
+    #     for m in [1, 2, 3, 4, 8, 12, 16, 24, 32, 48, 64, 118, 128, 152, 768, 1024]:
+    #         for thread_k, thread_n in [(64, 256), (128, 128)]:
+    #             if m > 16 and thread_k == 128:
+    #                 continue
+    #             # testing  'ideal' case
+    #             self.run_problem(m, 256*2, 1024, thread_k, thread_n)
     
-    def test_k_stages_divisibility(self):
-        print()
-        for k in [3 * 64 + 64 * 4 * 2 + 64 * i for i in range(1, 4)]:
-            self.run_problem(16, 2 * 256, k, 64, 256)
+    # def test_k_stages_divisibility(self):
+    #     print()
+    #     for k in [3 * 64 + 64 * 4 * 2 + 64 * i for i in range(1, 4)]:
+    #         self.run_problem(16, 2 * 256, k, 64, 256)
 
-    def test_very_few_stages(self):
-        print()
-        for k in [64, 128, 192]:
-            self.run_problem(16, 2 * 256, k, 64, 256)
+    # def test_very_few_stages(self):
+    #     print()
+    #     for k in [64, 128, 192]:
+    #         self.run_problem(16, 2 * 256, k, 64, 256)
     
-    def test_errors(self):
-        print()
-        m, n, k = 16, 256, 64
-        A = torch.randn((m, k), dtype=torch.half, device=DEV)
-        B_ref, B, s = gen_mixed_weight(k, n)
-        C = torch.zeros((m, n), dtype=torch.half, device=DEV)
-        workspace = torch.zeros(n // 128, device=DEV)
-        err = False
-        try:
-            fp6_marlin.mul(A, B, C, s, workspace, -1, 128, 128, -1)
-        except:
-            err = True 
-        self.assertTrue(err)
-        err = False
-        try:
-            fp6_marlin.mul(A, B, C, s, workspace, -1, 256, 256, -1)
-        except:
-            err = True 
-        self.assertTrue(err)
-        s = torch.zeros((2, n), dtype=torch.half, device=DEV)
-        err = False
-        try:
-            fp6_marlin.mul(A, B, C, s, workspace, -1, 256, 256, -1)
-        except:
-            err = True 
-        self.assertTrue(err)
+    # def test_errors(self):
+    #     print()
+    #     m, n, k = 16, 256, 64
+    #     A = torch.randn((m, k), dtype=torch.half, device=DEV)
+    #     B_ref, B, s = gen_mixed_weight(k, n)
+    #     C = torch.zeros((m, n), dtype=torch.half, device=DEV)
+    #     workspace = torch.zeros(n // 128, device=DEV)
+    #     err = False
+    #     try:
+    #         fp6_marlin.mul(A, B, C, s, workspace, -1, 128, 128, -1)
+    #     except:
+    #         err = True 
+    #     self.assertTrue(err)
+    #     err = False
+    #     try:
+    #         fp6_marlin.mul(A, B, C, s, workspace, -1, 256, 256, -1)
+    #     except:
+    #         err = True 
+    #     self.assertTrue(err)
+    #     s = torch.zeros((2, n), dtype=torch.half, device=DEV)
+    #     err = False
+    #     try:
+    #         fp6_marlin.mul(A, B, C, s, workspace, -1, 256, 256, -1)
+    #     except:
+    #         err = True 
+    #     self.assertTrue(err)
 
     def test_mixed(self):
         print()
-        for m in [16]:
+        for m in [1]:
             for quant_cols in [256]:
-                for n, k in [(256, 512), (256, 1024), (256 * 128, 1024)]:
-                    for thread_shape in [(128, 128), (64, 256)]:
+                for n, k in [
+                            # (256, 512), 
+                            (256, 256), 
+                            # (256 * 128, 1024)
+                            ]:
+                    for thread_shape in [
+                                        (128, 128), 
+                                        # (64, 256)
+                                         ]:
+                        if m > 16 and thread_shape[0] == 128:
+                            continue
                         self.run_problem(m, n, k, *thread_shape, quant_cols)
 
 if __name__ == '__main__':

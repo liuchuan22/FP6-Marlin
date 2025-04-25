@@ -228,7 +228,7 @@ __device__ inline int lop3(int a, int b, int c) {
 }
 __device__ inline void dequant_8int4(
   uint32_t __restrict__ reg[4],
-  uint32_t q
+  int q
 ) {
   half2 *reg_ptr = reinterpret_cast<half2*>(reg);
   const int LO = 0x000f000f;
@@ -287,7 +287,7 @@ __global__ void fp6_kernel_marlin(
 
   bool is_6bit = false;
   int bit4_sm = gridDim.x;
-  int prob_n_global = prob_n;
+  // int prob_n_global = prob_n;
   if (quant_cols != -1) {
     int ratio = prob_n / quant_cols;
     int bit6_sm = gridDim.x / ratio;
@@ -299,7 +299,8 @@ __global__ void fp6_kernel_marlin(
       B += (prob_n - quant_cols) * prob_k * 4 / 128;
       s += (prob_n - quant_cols) * 16 / 128;
       // offset of B, s and C
-      C += (prob_n - quant_cols) * 16 / 128;
+      C += (prob_n - quant_cols) * prob_m * 16 / 128;
+      locks += (prob_n - quant_cols) / 8;
       prob_n = quant_cols;
     }
   }
@@ -346,7 +347,7 @@ __global__ void fp6_kernel_marlin(
   if (slice_col_par >= n_tiles) {
     A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
     //!TODO: C needs to be handled specially!
-    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n_global / 8;
+    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
   }
@@ -379,7 +380,7 @@ __global__ void fp6_kernel_marlin(
     if (slice_col == n_tiles) {
       A += 16 * thread_m_blocks * prob_k / 8;
       //!TODO: C needs to be handled specially!
-      C += 16 * thread_m_blocks * prob_n_global / 8;
+      C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
     }
@@ -481,7 +482,7 @@ __global__ void fp6_kernel_marlin(
   auto zero_accums = [&] () {
     #pragma unroll
     for (int i = 0; i < thread_m_blocks * 4 * 2 * 4; i++)
-      reinterpret_cast<float*>(c_frag)[i] = 0.0f;
+      reinterpret_cast<float*>(c_frag)[i] = 0;
   };
 
   auto fetch_to_shared = [&] (int pipe, int a_off, bool pred = true) {
@@ -541,26 +542,26 @@ __global__ void fp6_kernel_marlin(
 
   auto matmul = [&] (int k) {
     uint32_t *b_frag_2bit_ptr;
-    uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
+    // uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
     if (is_6bit) {
       b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
     } else {
       b_frag_2bit_ptr = nullptr;
     }
-    uint32_t b_dequant[4];
     #pragma unroll
     for (int j = 0; j < 4; j++) {
+      uint32_t b_dequant[4];
       if (is_6bit) {
-        dequant_8fp6(b_dequant, *b_frag_2bit_ptr, *b_frag_4bit_ptr);
+        dequant_8fp6(b_dequant, *b_frag_2bit_ptr, b_frag_4bit[k % 2][j]);
         if (j % 2 == 1) {
           b_frag_2bit_ptr++;
         } else {
           *b_frag_2bit_ptr = *b_frag_2bit_ptr << 4;
         }
       } else {
-        dequant_8int4(b_dequant, *b_frag_4bit_ptr);
+        dequant_8int4(b_dequant, int(b_frag_4bit[k % 2][j]));
       }
-      b_frag_4bit_ptr++;
+      // b_frag_4bit_ptr++;
       for (int i = 0; i < thread_m_blocks; i++) {
         uint32_t* b_dequant_ptr = reinterpret_cast<uint32_t*>(&b_dequant);
         mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][0]);
@@ -568,34 +569,6 @@ __global__ void fp6_kernel_marlin(
         mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][1]);
       }
     }
-    // first dequant the 32 fp6 values in registers
-    // uint32_t b_dequant[4][4];
-    // uint32_t *b_frag_2bit_ptr;
-    // if (is_6bit) {
-    //   b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
-    // } else {
-    //   b_frag_2bit_ptr = nullptr;
-    // }     
-    // uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
-    // // scale later if we do per-channel quantization
-    // //!TODO: Add the dequant function of 4bit!
-    // dequant_32fp6(b_dequant, b_frag_2bit_ptr, b_frag_4bit_ptr);
-
-    // // then do the mma
-    // #pragma unroll
-    // for (int j = 0; j < 4; j++) { // 4 16x16 subtiles in the row of B dimension.
-    //   FragB b_frag0, b_frag1;
-    //   b_frag0[0] = reinterpret_cast<half2&>(b_dequant[j][0]);
-    //   b_frag0[1] = reinterpret_cast<half2&>(b_dequant[j][1]);
-    //   b_frag1[0] = reinterpret_cast<half2&>(b_dequant[j][2]);
-    //   b_frag1[1] = reinterpret_cast<half2&>(b_dequant[j][3]);
-
-    //   #pragma unroll
-    //   for (int i = 0; i < thread_m_blocks; i++) {
-    //     mma(a_frag[k % 2][i], b_frag0, c_frag[i][j][0]);
-    //     mma(a_frag[k % 2][i], b_frag1, c_frag[i][j][1]);
-    //   }
-    // }
   };
 
   // reduce over the multiple warps in smem of one threadblock
@@ -645,7 +618,7 @@ __global__ void fp6_kernel_marlin(
   auto global_reduce = [&] (bool first = false, bool last = false) {
     constexpr int active_threads = 32 * thread_n_blocks / 4;
     if (threadIdx.x < active_threads) {
-      int c_gl_stride = prob_n_global / 8;
+      int c_gl_stride = prob_n / 8;
       int c_gl_wr_delta_o = 8 * c_gl_stride;
       int c_gl_wr_delta_i = 4 * (active_threads / 32);
       int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) + 4 * (threadIdx.x / 32) + threadIdx.x % 4;
@@ -696,7 +669,7 @@ __global__ void fp6_kernel_marlin(
   };
 
   auto write_result = [&] () {
-    int c_gl_stride = prob_n_global / 8;
+    int c_gl_stride = prob_n / 8;
     constexpr int c_sh_stride = 2 * thread_n_blocks + 1;
     int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));
     constexpr int c_sh_rd_delta = c_sh_stride * (threads / (2 * thread_n_blocks));
@@ -709,6 +682,12 @@ __global__ void fp6_kernel_marlin(
 
     //!TODO: probably problem here.
     int c_gl_wr_end = c_gl_stride * prob_m;
+    // int c_gl_wr_end;
+    // if (is_6bit) {
+    //   c_gl_wr_end = c_gl_stride * prob_m - (prob_n_global - quant_cols) / 8;
+    // } else {
+    //   c_gl_wr_end = c_gl_stride * (prob_m - 1) + (prob_n_global - quant_cols) / 8;
+    // }
 
     // We first reorder in shared memory to guarantee the most efficient final global write patterns
     auto write = [&] (int idx, float c0, float c1, FragS& s) {
@@ -879,7 +858,7 @@ int fp6_marlin_cuda(
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev); // 114 on 4090 gpu
   // printf("sms: %d\n", sms);
   // 1 block for easy debugging
-  // sms = 1;
+  // sms = 8;
   if (thread_k == -1 || thread_n == -1) {
     if (prob_m <= 16) {
       thread_k = 128;

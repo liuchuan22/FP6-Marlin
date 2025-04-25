@@ -275,10 +275,10 @@ template <
   const int quant_cols = -1
 >
 __global__ void fp6_kernel_marlin(
-  const uint4* __restrict__ A,
-  const uint4* __restrict__ B, // fp6 quantized weight matrix of shape kxn
-  uint4* __restrict__ C,
-  const uint4* __restrict__ s, // fp16 quantization scales of shape 1xn
+  const int4* __restrict__ A,
+  const int4* __restrict__ B, // fp6 quantized weight matrix of shape kxn
+  int4* __restrict__ C,
+  const int4* __restrict__ s, // fp16 quantization scales of shape 1xn
   int  prob_m,
   int  prob_n,
   int  prob_k,
@@ -304,10 +304,10 @@ __global__ void fp6_kernel_marlin(
       prob_n = quant_cols;
     }
   }
-  const uint2* B_2bit;
-  const uint4* B_4bit;
+  const int2* B_2bit;
+  const int4* B_4bit;
   if (is_6bit) {
-    B_2bit = reinterpret_cast<const uint2*>(B);
+    B_2bit = reinterpret_cast<const int2*>(B);
     B_4bit = B + prob_k * prob_n * 2 / 128;
   } else {
     B_2bit = nullptr;
@@ -315,8 +315,8 @@ __global__ void fp6_kernel_marlin(
   }
 
   // first get the pointer of packed 2 bit and 4 bit fp6 values
-  // const uint2* B_2bit = reinterpret_cast<const uint2*>(B);
-  // const uint4* B_4bit = B + prob_k * prob_n * 2 / 128;
+  // const int2* B_2bit = reinterpret_cast<const int2*>(B);
+  // const int4* B_4bit = B + prob_k * prob_n * 2 / 128;
 
   int parallel = 1;
   if (prob_m > 16 * thread_m_blocks) {
@@ -452,12 +452,12 @@ __global__ void fp6_kernel_marlin(
       a_sh_rd_trans[i][j] = transform_a(a_sh_rd_delta_o * i + a_sh_rd_delta_i * j + a_sh_rd);
   }
 
-  const uint4* B_ptr_4bit[b_sh_wr_iters];
+  const int4* B_ptr_4bit[b_sh_wr_iters];
   #pragma unroll
   for (int i = 0; i < b_sh_wr_iters; i++) {
     B_ptr_4bit[i] = B_4bit + b_gl_rd_delta_i * i + b_gl_rd;
   }
-  const uint2* B_ptr_2bit[b_sh_wr_iters];
+  const int2* B_ptr_2bit[b_sh_wr_iters];
   #pragma unroll
   for (int i = 0; i < b_sh_wr_iters; i++) {
     // B_ptr_2bit[i] = B_2bit + b_gl_rd_delta_i * i + b_gl_rd;
@@ -465,12 +465,12 @@ __global__ void fp6_kernel_marlin(
   }
 
   // shared memory
-  extern __shared__ uint4 shared_mem[];
-  uint4* shared_A = shared_mem;
+  extern __shared__ int4 shared_mem[];
+  int4* shared_A = shared_mem;
   // 4bit first, then 2bit. This is best suited for later reductions of marlin.
-  uint4* shared_B_4bit = shared_A + a_sh_stage * stages;
-  uint2* shared_B_2bit = reinterpret_cast<uint2*>(shared_B_4bit + b_sh_stage * stages);
-  uint4* shared_S = (!is_6bit) ? reinterpret_cast<uint4*>(shared_B_2bit): reinterpret_cast<uint4*>(shared_B_2bit + b_sh_stage * stages);
+  int4* shared_B_4bit = shared_A + a_sh_stage * stages;
+  int2* shared_B_2bit = reinterpret_cast<int2*>(shared_B_4bit + b_sh_stage * stages);
+  int4* shared_S = (!is_6bit) ? reinterpret_cast<int4*>(shared_B_2bit): reinterpret_cast<int4*>(shared_B_2bit + b_sh_stage * stages);
 
   // registers
   FragA a_frag[2][thread_m_blocks];
@@ -484,10 +484,15 @@ __global__ void fp6_kernel_marlin(
     for (int i = 0; i < thread_m_blocks * 4 * 2 * 4; i++)
       reinterpret_cast<float*>(c_frag)[i] = 0;
   };
+  auto zero_accums_a = [&] (int k) {
+    #pragma unroll
+    for (int i = 0; i < thread_m_blocks * 8; i++)
+      reinterpret_cast<half*>(a_frag[k%2])[i] = 0;
+  };
 
   auto fetch_to_shared = [&] (int pipe, int a_off, bool pred = true) {
     if (pred) {
-      uint4* sh_a_stage = shared_A + a_sh_stage * pipe;
+      int4* sh_a_stage = shared_A + a_sh_stage * pipe;
       #pragma unroll
       for (int i = 0; i < a_sh_wr_iters; i++) {
         cp_async4_pred(
@@ -497,41 +502,44 @@ __global__ void fp6_kernel_marlin(
         );
       }
       //
-      uint4* sh_b_stage_4bit = shared_B_4bit + b_sh_stage * pipe;
+      int4* sh_b_stage_4bit = shared_B_4bit + b_sh_stage * pipe;
       #pragma unroll
       for (int i = 0; i < b_sh_wr_iters; i++) {
         cp_async4_stream(&sh_b_stage_4bit[b_sh_wr_delta * i + b_sh_wr], B_ptr_4bit[i]);
         B_ptr_4bit[i] += b_gl_rd_delta_o;
       }
-      uint2* sh_b_stage_2bit;
+      // int2* sh_b_stage_2bit;
       if (is_6bit) {
-        sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
+        int2* sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
         #pragma unroll
         for (int i = 0; i < b_sh_wr_iters; i++) {
           cp_async2_stream(&sh_b_stage_2bit[b_sh_wr_delta * i + b_sh_wr], B_ptr_2bit[i]);
           B_ptr_2bit[i] += b_gl_rd_delta_o;
         }
-      } else {
-        sh_b_stage_2bit = nullptr;
-      }
+      } 
+      // else {
+      //   sh_b_stage_2bit = nullptr;
+      // }
     }
     cp_async_fence();
   };
   auto wait_for_stage = [&] () {
     // Wait until at most (stages-2) async copy stages are still pending.
     cp_async_wait<stages - 2>();
+    // cp_async_wait_all();
     __syncthreads();
   };
 
   auto fetch_to_registers = [&] (int k, int pipe) {
-    uint4* sh_a_stage = shared_A + a_sh_stage * pipe;
+    int4* sh_a_stage = shared_A + a_sh_stage * pipe;
+    zero_accums_a(k);
     #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++) {
       ldsm4(a_frag[k%2][i], &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
     }
-    uint4* sh_b_stage_4bit = shared_B_4bit + b_sh_stage * pipe;
+    int4* sh_b_stage_4bit = shared_B_4bit + b_sh_stage * pipe;
     b_frag_4bit[k%2] = *reinterpret_cast<I4*>(&sh_b_stage_4bit[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd]);
-    uint2* sh_b_stage_2bit;
+    int2* sh_b_stage_2bit;
     if (is_6bit) {
       sh_b_stage_2bit = shared_B_2bit + b_sh_stage * pipe;
       b_frag_2bit[k%2] = *reinterpret_cast<I2*>(&sh_b_stage_2bit[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd]);
@@ -595,7 +603,7 @@ __global__ void fp6_kernel_marlin(
                 for (int k = 0; k < 4; k++)
                   reinterpret_cast<FragC*>(c_frag)[4 * 2 * m_block + j][k] += c_rd[k] + c_wr[k];
               }
-              shared_mem[red_sh_wr] = reinterpret_cast<uint4*>(&c_frag)[4 * 2 * m_block + j];
+              shared_mem[red_sh_wr] = reinterpret_cast<int4*>(&c_frag)[4 * 2 * m_block + j];
             }
           }
           __syncthreads();
@@ -645,7 +653,7 @@ __global__ void fp6_kernel_marlin(
       for (int i = 0; i < thread_m_blocks * 4; i++) {
         if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m) {
           if (!first) {
-            uint4 c_red = shared_mem[c_sh_wr + i * c_sh_wr_delta];
+            int4 c_red = shared_mem[c_sh_wr + i * c_sh_wr_delta];
             #pragma unroll
             for (int j = 0; j < 2 * 4; j++) {
               reinterpret_cast<float*>(&c_frag)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] += __half2float(
@@ -654,7 +662,7 @@ __global__ void fp6_kernel_marlin(
             }
           }
           if (!last) {
-            uint4 c;
+            int4 c;
             #pragma unroll
             for (int j = 0; j < 2 * 4; j++) {
               reinterpret_cast<__half*>(&c)[j] = __float2half(
@@ -727,6 +735,7 @@ __global__ void fp6_kernel_marlin(
     for (int i = 0; i < stages - 1; i++)
       fetch_to_shared(i, i, i < slice_iters);
     zero_accums();
+    // cp_async_wait_all();
     wait_for_stage();
     fetch_to_registers(0, 0);
     a_gl_rd += a_gl_rd_delta_o * (stages - 1);
@@ -743,6 +752,7 @@ __global__ void fp6_kernel_marlin(
         if (k == b_sh_wr_iters - 2) {
           fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages);
           pipe++;
+          // cp_async_wait_all();
           wait_for_stage();
         }
         matmul(k);
@@ -767,8 +777,8 @@ __global__ void fp6_kernel_marlin(
         cp_async_wait<0>();
         __syncthreads();
         if (threadIdx.x / 32 < thread_n_blocks / 4) {
-          reinterpret_cast<uint4*>(&s_frag)[0] = shared_S[s_sh_rd + 0];
-          reinterpret_cast<uint4*>(&s_frag)[1] = shared_S[s_sh_rd + 4];
+          reinterpret_cast<int4*>(&s_frag)[0] = shared_S[s_sh_rd + 0];
+          reinterpret_cast<int4*>(&s_frag)[1] = shared_S[s_sh_rd + 4];
         }
       }
       if (slice_count > 1) {
@@ -878,10 +888,10 @@ int fp6_marlin_cuda(
   if (prob_m == 0 || prob_n == 0 || prob_k == 0)
     return 0;
 
-  const uint4* A_ptr = (const uint4*) A;
-  const uint4* B_ptr = (const uint4*) B;
-  uint4* C_ptr = (uint4*) C;
-  const uint4* s_ptr = (const uint4*) s;
+  const int4* A_ptr = (const int4*) A;
+  const int4* B_ptr = (const int4*) B;
+  int4* C_ptr = (int4*) C;
+  const int4* s_ptr = (const int4*) s;
 
   int* locks = (int*) workspace;
 

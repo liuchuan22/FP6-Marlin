@@ -159,7 +159,8 @@ class Test(unittest.TestCase):
     def run_problem(self, m, n, k, thread_k, thread_n, quant_cols=-1):
         print('% 5d % 6d % 6d % 4d % 4d % 4d' % (m, n, k, thread_k, thread_n, quant_cols))
         # A = torch.randn((m, k), dtype=torch.half, device=DEV)
-        A = torch.randint(1, 2, (m, k), dtype=torch.half, device=DEV)
+        # A = torch.randint(1, 128, (m, k), dtype=torch.half, device=DEV)
+        A = torch.full((m, k), 61, dtype=torch.half, device=DEV)
         # A[0, :16] = 0.
         B_ref, B, s = gen_mixed_weight(k, n, quant_cols)
         C = torch.zeros((m, n), dtype=torch.half, device=DEV).contiguous()
@@ -173,10 +174,11 @@ class Test(unittest.TestCase):
             c_2 = C[m*(n-quant_cols):].reshape(m, quant_cols)
             C = torch.cat([c_1, c_2], dim=1)
         C = C.reshape(m, n)
-        # print(C)
-        # print(C_ref)
-        print('C', C.shape)
+        print(C)
+        print(C_ref)
+        # print('C', C.shape)
         print(C-C_ref)
+        # print(A[0,0])
         nonzero_indices = torch.nonzero(C - C_ref)
         # print(nonzero_indices)
         self.assertLess(torch.mean(torch.abs(C - C_ref)) / torch.mean(torch.abs(C_ref)), 0.001)
@@ -230,15 +232,15 @@ class Test(unittest.TestCase):
     def test_mixed(self):
         print()
         for m in [1]:
-            for quant_cols in [256]:
+            for quant_cols in [-1]:
                 for n, k in [
                             # (256, 512), 
                             (256, 256), 
                             # (256 * 128, 1024)
                             ]:
                     for thread_shape in [
-                                        (128, 128), 
-                                        # (64, 256)
+                                        # (128, 128), 
+                                        (64, 256)
                                          ]:
                         if m > 16 and thread_shape[0] == 128:
                             continue

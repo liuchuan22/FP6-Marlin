@@ -67,6 +67,39 @@ void fp6_marlin_mul(
       "No kernel implementation for thread_k=", thread_k, ", thread_n=", thread_n, "."
     );
   }
+  if (quant_cols == -1 || quant_cols == prob_n) {
+    return;
+  }
+  // reshape C array layout
+  C = C.flatten(0, 1);
+  int tot_m = prob_m;
+  int tot_m_blocks = (tot_m + 15) / 16;
+  int pad = 16 * tot_m_blocks - tot_m;
+  int start = 0;
+  for (int i = 0; i < tot_m_blocks; i += 4) {
+    int thread_m_blocks = tot_m_blocks - i;
+    prob_m = tot_m - 16 * i;
+    int par = 1;
+    if (thread_m_blocks > 4) {
+      // Note that parallel > 1 currently only works for inputs without any padding
+      par = (16 * thread_m_blocks - pad) / 64;
+      if (par > max_par)
+        par = max_par;
+      prob_m = 64 * par;
+      i += 4 * (par - 1);
+      thread_m_blocks = 4;
+    }
+    // C_1 contains the first prob_m * (prob_n - quant_cols) elements of C
+    torch::Tensor C_1 = C.narrow(0, start, prob_m * (prob_n - quant_cols));
+    // C_2 contains the last prob_m * quant_cols elements of C
+    torch::Tensor C_2 = C.narrow(0, start + prob_m * (prob_n - quant_cols), prob_m * quant_cols);
+    C_1 = C_1.view({prob_m, prob_n - quant_cols});
+    C_2 = C_2.view({prob_m, quant_cols});
+    torch::Tensor C_cat = torch::cat({C_1, C_2}, 1);
+    C.narrow(0, start, prob_m * prob_n) = C_cat.flatten(0, 1);
+    start += prob_m * prob_n;
+  }
+  C = C.view({tot_m, prob_n});
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

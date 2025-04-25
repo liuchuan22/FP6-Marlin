@@ -346,7 +346,6 @@ __global__ void fp6_kernel_marlin(
 
   if (slice_col_par >= n_tiles) {
     A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
-    //!TODO: C needs to be handled specially!
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
@@ -379,7 +378,6 @@ __global__ void fp6_kernel_marlin(
     }
     if (slice_col == n_tiles) {
       A += 16 * thread_m_blocks * prob_k / 8;
-      //!TODO: C needs to be handled specially!
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
@@ -484,11 +482,6 @@ __global__ void fp6_kernel_marlin(
     for (int i = 0; i < thread_m_blocks * 4 * 2 * 4; i++)
       reinterpret_cast<float*>(c_frag)[i] = 0;
   };
-  auto zero_accums_a = [&] (int k) {
-    #pragma unroll
-    for (int i = 0; i < thread_m_blocks * 8; i++)
-      reinterpret_cast<half*>(a_frag[k%2])[i] = 0;
-  };
 
   auto fetch_to_shared = [&] (int pipe, int a_off, bool pred = true) {
     if (pred) {
@@ -532,7 +525,6 @@ __global__ void fp6_kernel_marlin(
 
   auto fetch_to_registers = [&] (int k, int pipe) {
     int4* sh_a_stage = shared_A + a_sh_stage * pipe;
-    zero_accums_a(k);
     #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++) {
       ldsm4(a_frag[k%2][i], &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
@@ -575,10 +567,10 @@ __global__ void fp6_kernel_marlin(
       uint32_t* b_dequant_ptr_2 = b_dequant_ptr_1 + 2;
       #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        half* a_frag_ptr = reinterpret_cast<half*>(&a_frag[k % 2][i]);
-        for (int l = 0; l < 8; l++) {
-          a_frag_ptr[l] = 61.0;
-        }
+        // half* a_frag_ptr = reinterpret_cast<half*>(&a_frag[k % 2][i]);
+        // for (int l = 0; l < 8; l++) {
+        //   a_frag_ptr[l] = 61.0;
+        // }
         mma(a_frag[k % 2][i], b_dequant_ptr_1, c_frag[i][j][0]);
         mma(a_frag[k % 2][i], b_dequant_ptr_2, c_frag[i][j][1]);
       }
@@ -628,7 +620,6 @@ __global__ void fp6_kernel_marlin(
     }
   };
 
-  //!TODO: Moidfy Global reduce and Write result for C matrix part.
   auto global_reduce = [&] (bool first = false, bool last = false) {
     constexpr int active_threads = 32 * thread_n_blocks / 4;
     if (threadIdx.x < active_threads) {
@@ -694,7 +685,6 @@ __global__ void fp6_kernel_marlin(
     c_sh_wr += 32 * (threadIdx.x / 32);
     int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
 
-    //!TODO: probably problem here.
     int c_gl_wr_end = c_gl_stride * prob_m;
     // int c_gl_wr_end;
     // if (is_6bit) {

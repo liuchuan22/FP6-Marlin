@@ -552,10 +552,11 @@ __global__ void fp6_kernel_marlin(
     uint32_t *b_frag_2bit_ptr;
     // uint32_t *b_frag_4bit_ptr = reinterpret_cast<uint32_t*>(b_frag_4bit[k % 2].elems);
     if (is_6bit) {
-      b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(b_frag_2bit[k % 2].elems);
-    } else {
-      b_frag_2bit_ptr = nullptr;
-    }
+      b_frag_2bit_ptr = reinterpret_cast<uint32_t*>(&b_frag_2bit[k % 2]);
+    } 
+    // else {
+    //   b_frag_2bit_ptr = nullptr;
+    // }
     #pragma unroll
     for (int j = 0; j < 4; j++) {
       uint32_t b_dequant[4];
@@ -570,11 +571,16 @@ __global__ void fp6_kernel_marlin(
         dequant_8int4(b_dequant, int(b_frag_4bit[k % 2][j]));
       }
       // b_frag_4bit_ptr++;
+      uint32_t* b_dequant_ptr_1 = reinterpret_cast<uint32_t*>(&b_dequant);
+      uint32_t* b_dequant_ptr_2 = b_dequant_ptr_1 + 2;
+      #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        uint32_t* b_dequant_ptr = reinterpret_cast<uint32_t*>(&b_dequant);
-        mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][0]);
-        b_dequant_ptr += 2;
-        mma(a_frag[k % 2][i], b_dequant_ptr, c_frag[i][j][1]);
+        half* a_frag_ptr = reinterpret_cast<half*>(&a_frag[k % 2][i]);
+        for (int l = 0; l < 8; l++) {
+          a_frag_ptr[l] = 61.0;
+        }
+        mma(a_frag[k % 2][i], b_dequant_ptr_1, c_frag[i][j][0]);
+        mma(a_frag[k % 2][i], b_dequant_ptr_2, c_frag[i][j][1]);
       }
     }
   };

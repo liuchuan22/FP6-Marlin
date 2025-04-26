@@ -27,8 +27,10 @@ NVCC_FLAGS = [  '-O3',
 
 setup(
     name='fp6_marlin',
-    version='0.0.1',
-    description='mixed precision matmul',
+    version='0.1',
+    author='Chuan Liu',
+    author_email='liuchuan22@mails.tsinghua.edu.cn',
+    description='(INT4&FP6)xFP16 mixed precision matmul',
     install_requires=['numpy', 'torch'],
     packages = find_packages(),
     ext_modules=[

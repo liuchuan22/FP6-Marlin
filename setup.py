@@ -33,7 +33,7 @@ setup(
     packages = find_packages(),
     ext_modules=[
         CUDAExtension(
-            name = 'fp6_marlin.cuda',
+            name = 'fp6_marlin_cuda',
             sources = [
                 'fp6_marlin/fp6_marlin_cuda.cpp', 
                 'fp6_marlin/fp6_marlin_cuda_kernel.cu'],
@@ -43,7 +43,7 @@ setup(
             },
         ),
         CUDAExtension(
-            name = 'fp6_marlin.cpu',
+            name = 'fp6_marlin_cpu',
             sources = [
                 'fp6_marlin/pybind.cpp',
                 'fp6_marlin/weight_prepacking.cpp', 

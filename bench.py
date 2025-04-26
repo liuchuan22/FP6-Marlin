@@ -49,22 +49,6 @@ def benchmark_quant(A, B, C, s, thread_k, thread_n, quant_cols):
         'GB/s': (2 * A.numel() + 4 * B.numel() + 2 * C.numel() + 2 * s.numel()) / res / 10 ** 9
     }
 
-# Pass the SM count for known GPUs to avoid the kernel having to query this information (this is very minor)
-gpu = torch.cuda.get_device_name(0)
-if 'A100' in gpu:
-    SMS = 108
-elif 'A10' in gpu:
-    SMS = 72
-elif '3090' in gpu:
-    SMS = 82
-elif '4090' in gpu:
-    SMS = 114
-elif 'A6000' in gpu:
-    SMS = 84
-else:
-    SMS = -1
-print('GPU: %s, SMS: %d' % (gpu, SMS))
-quant_cols = 256
 
 MODELS = {
     # 'ideal': [
@@ -102,9 +86,12 @@ MODELS = {
 }
 
 # Set to true in order to run a more complete benchmark sweep; the default is reproduce README experiments
-ALL = True
+ALL = False
 
-for model, layers in MODELS.items():
+for quant_cols in [-1, 256]:
+    print('Quantization columns: %d' % quant_cols)
+    print()
+    for model, layers in MODELS.items():
         print(model)
         if ALL:
             batchsizes =  [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]

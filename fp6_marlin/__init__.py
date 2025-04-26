@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-import fp6_marlin.cuda
-import fp6_marlin.cpu
+import fp6_marlin_cuda
+import fp6_marlin_cpu
 
 def prepacking(fp6_tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -13,7 +13,7 @@ def prepacking(fp6_tensor: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: The prepacked weight tensor.
     """
-    return fp6_marlin.cpu.prepacking_cpu(fp6_tensor)
+    return fp6_marlin_cpu.prepacking_cpu(fp6_tensor)
 
 def quantize(fp16_tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -23,7 +23,7 @@ def quantize(fp16_tensor: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: The quantized fp6 weight (INT32).
     """
-    return fp6_marlin.cpu.quantization_cpu(fp16_tensor)
+    return fp6_marlin_cpu.quantization_cpu(fp16_tensor)
 
 def dequantize(fp6_tensor: torch.Tensor, fp16_scales: torch.Tensor) -> torch.Tensor:
     """
@@ -34,8 +34,8 @@ def dequantize(fp6_tensor: torch.Tensor, fp16_scales: torch.Tensor) -> torch.Ten
     Returns:
         torch.Tensor: The dequantized fp16 weight.
     """
-    return fp6_marlin.cpu.dequantization_cpu(fp6_tensor, fp16_scales)
+    return fp6_marlin_cpu.dequantization_cpu(fp6_tensor, fp16_scales)
 
 def mul(A, B, C, s, workspace, quant_cols = -1, thread_k = -1, thread_n = -1, sms = -1, max_par = 16):
-    return fp6_marlin.cuda.mul(A, B, C, s, workspace, quant_cols, thread_k, thread_n, sms, max_par)
+    return fp6_marlin_cuda.mul(A, B, C, s, workspace, quant_cols, thread_k, thread_n, sms, max_par)
     

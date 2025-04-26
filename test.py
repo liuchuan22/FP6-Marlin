@@ -230,7 +230,7 @@ class Test(unittest.TestCase):
         print()
         for m in [1, 12, 16, 64, 65, 77, 152, 256, 1024]:
             for quant_cols in [256]:
-                for n, k in [(256, 512), (256*2, 1024)]:
+                for n, k in [(256, 512), (256*2, 1024), (256*100, 1024)]:
                     for thread_shape in [(128, 128), (64, 256)]:
                         if m > 16 and thread_shape[0] == 128:
                             continue

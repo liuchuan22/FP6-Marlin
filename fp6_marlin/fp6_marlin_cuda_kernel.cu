@@ -287,10 +287,11 @@ __global__ void fp6_kernel_marlin(
 
   bool is_6bit = false;
   int bit4_sm = gridDim.x;
-  // int prob_n_global = prob_n;
+  int prob_n_global = prob_n;
   if (quant_cols != -1) {
     int ratio = prob_n / quant_cols;
-    int bit6_sm = gridDim.x / ratio;
+    // int bit6_sm = gridDim.x / ratio;
+    int bit6_sm = min(gridDim.x - 1, gridDim.x / ratio * 4);
     bit4_sm = gridDim.x - bit6_sm;
     if (blockIdx.x < bit4_sm) {
       prob_n = prob_n - quant_cols;
@@ -299,7 +300,8 @@ __global__ void fp6_kernel_marlin(
       B += (prob_n - quant_cols) * prob_k * 4 / 128;
       s += (prob_n - quant_cols) * 16 / 128;
       // offset of B, s and C
-      C += (prob_n - quant_cols) * prob_m * 16 / 128;
+      // C += (prob_n - quant_cols) * prob_m * 16 / 128;
+      C += (prob_n - quant_cols) * 16 / 128;
       locks += (prob_n - quant_cols) / 8;
       prob_n = quant_cols;
     }
@@ -346,7 +348,7 @@ __global__ void fp6_kernel_marlin(
 
   if (slice_col_par >= n_tiles) {
     A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
-    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
+    C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n_global / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
   }
@@ -378,7 +380,7 @@ __global__ void fp6_kernel_marlin(
     }
     if (slice_col == n_tiles) {
       A += 16 * thread_m_blocks * prob_k / 8;
-      C += 16 * thread_m_blocks * prob_n / 8;
+      C += 16 * thread_m_blocks * prob_n_global / 8;
       locks += n_tiles;
       slice_col = 0;
     }
@@ -623,7 +625,7 @@ __global__ void fp6_kernel_marlin(
   auto global_reduce = [&] (bool first = false, bool last = false) {
     constexpr int active_threads = 32 * thread_n_blocks / 4;
     if (threadIdx.x < active_threads) {
-      int c_gl_stride = prob_n / 8;
+      int c_gl_stride = prob_n_global / 8;
       int c_gl_wr_delta_o = 8 * c_gl_stride;
       int c_gl_wr_delta_i = 4 * (active_threads / 32);
       int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) + 4 * (threadIdx.x / 32) + threadIdx.x % 4;
@@ -674,7 +676,7 @@ __global__ void fp6_kernel_marlin(
   };
 
   auto write_result = [&] () {
-    int c_gl_stride = prob_n / 8;
+    int c_gl_stride = prob_n_global / 8;
     constexpr int c_sh_stride = 2 * thread_n_blocks + 1;
     int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));
     constexpr int c_sh_rd_delta = c_sh_stride * (threads / (2 * thread_n_blocks));
